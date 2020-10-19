@@ -1,0 +1,192 @@
+---
+title: "Dow Jones: Contrarian and Momentum Startegy"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(plyr)
+library(devtools)
+library(reshape)
+library(tseries)
+library(zoo)
+library(xts)
+library(ggplot2)
+```
+
+Read/Clean Data
+```{r}
+dow_all <- read.csv("/Users/nastyademina/Desktop/r studio/all_stocks_2006-01-01_to_2018-01-01.csv")
+dow_all$Date <- as.Date(dow_all$Date, format = "%Y-%m-%d")
+dow_all <- dow_all[which(dow_all$Date>'2009-12-31'),]
+stock <- subset(dow_all, select = c("Date","Close","Name"))
+dow <- reshape(stock, timevar = "Name", idvar = "Date", direction = "wide")
+df<-as.data.frame(subset(dow, select = "Date"))
+
+for (i in 2:ncol(dow)){
+  ret <- (dow[,i] - lag(dow[,i]))/lag(dow[,i])
+  df <- cbind(df,ret)
+}
+
+names <- as.character(stock$Name %>% unique)
+colnames(df)[2:ncol(df)]<- names
+
+
+df <- df[,-31] # remove Amazon from dataset as not in DOW 
+df <- df[-1,] # cut first row of NA
+dates <- as.data.frame(df$Date[2:nrow(df)])
+colnames(dates)[1] <- "Date"
+df <- df[,-1]
+df <- na.locf(df) # fill in any remaining NA's with last valuelibrary(ggplot2)
+
+df1 <- dates
+df1$mean <- apply(df, 1, FUN=mean)[-1]
+df1$cum.ret <- cumprod(1+df1$mean)
+
+#plot daily returns of Dow Jones and cumulative returns for years 2010-2018 
+ggplot(df1)+geom_line(aes(x=Date,y=mean))+theme_minimal()+xlab("Date")+ylab("Returns") + ggtitle("Average Returns of 30 Stocks in Dow Jones")
+
+ggplot(df1)+geom_line(aes(x=Date,y=cum.ret))+theme_minimal()+xlab("Date")+ylab("Returns") + ggtitle("Cumulative Average Return of 438 Stocks in Dow Jones")
+
+```
+
+Contrarian strategy
+
+Defining Signals
+```{r, warning=FALSE}
+#calculating market return
+df$mean <- apply(df, 1, FUN=mean)
+market <- as.data.frame(df$mean[2:nrow(df)])
+colnames(market)[1] <- "Market Return"
+
+#signal
+contr <- -(df[,c(2:(ncol(df)-1))]-df$mean)
+```
+
+Function to Calculate Weights For Contrarian Strategy
+```{r}
+# function to sell winners and buy losers
+contrarian<- function(x){
+  index <- order(x, decreasing=TRUE)
+  x.sort <- sort(x, decreasing=TRUE)
+  constant <- length(x)/10
+  vec <- c(rep.int(1/constant, 3), rep.int(0,length(x)-2*constant),rep.int(-1/constant, 3))
+  x.sort <- rbind(x.sort,vec)
+  x.sort <- x.sort[-1,]
+  x[index] <- x.sort
+  return(x)
+}
+
+#calculate matrix of weights
+weight_contr <- apply(contr, 1, contrarian)
+weight_contr <- t(weight_contr)
+
+#cut the first observation for returns and the last observation for weights since we use lagged weights 
+#in our strategy
+return <- df[-1, 2:(ncol(df)-1)]
+weight_contr <- weight_contr[1:(nrow(weight_contr)-1),]
+port_return <- return*weight_contr
+
+#calculating the strategy profit
+port_return.contr <- apply(port_return, 1, sum)
+
+#calculate annlualized mean, std and Sharpe Ratio
+ann_return.contr <- mean(port_return.contr)*252*100
+ann_return.contr
+std_return.contr <- sd(port_return.contr)*sqrt(252)*100
+std_return.contr
+sharpe.contr <- ann_return.contr/std_return.contr
+sharpe.contr
+
+#plot Daily Portfolio Returns and Cumulative Portfolio Returns
+port_return.contr <- as.data.frame(port_return.contr)
+port_return.contr <- cbind(dates,port_return.contr)
+ggplot(port_return.contr)+geom_line(aes(x=Date,y=port_return.contr))+theme_minimal() + xlab("Date")+ylab("Returns") + ggtitle("Daily Portfolio Returns of Contrarian Strategy")
+
+port_return.contr$cum.ret.contr <- cumprod(1+port_return.contr$port_return.contr)*100
+ggplot(port_return.contr)+geom_line(aes(x=Date,y=cum.ret.contr))+theme_minimal() + xlab("Date")+ylab("Returns") + ggtitle("Cumulative Portfolio Returns of Contrarian Strategy")
+```
+
+Momentum strategy 6 months rebalancing
+```{r}
+df1<-as.data.frame(subset(dow, select = "Date"))
+
+for (i in 2:ncol(dow)){
+  ret <- (dow[,i] - lag(dow[,i]))/lag(dow[,i])
+  df1 <- cbind(df1,ret)
+}
+
+names <- as.character(stock$Name %>% unique)
+colnames(df1)[2:ncol(df1)]<- names
+
+
+df1 <- df1[,-31] # remove Amazon from dataset as not in DOW 
+df1 <- df1[-1,] # cut first row of NA
+df1 <- df1[,-1]
+df1 <- na.locf(df1) # fill in any remaining NA's with last value
+
+test <- df1+1
+test <- rollapply(test,126,FUN=prod, by=126) #calculate cumulative returns every six months 
+#we look at the cumulative return for the past six months and based on them calculate the signal 
+#we use that signal for the next six months
+test <- as.data.frame(test)
+test$mean <- apply(test, 1, FUN=mean)
+test <- test[1:(nrow(test)-1),] 
+
+mat <- as.data.frame(matrix(NA,nrow(test)*126,ncol(test)))
+for (i in 0:(nrow(test)-1)){
+  mat[((126*i+1):(126+126*i)),] <- test[(i+1),]
+}
+```
+
+```{r}
+#signal
+colnames(mat)[ncol(mat)] <- "mean"
+m <- (mat[,c(1:(ncol(mat)-1))]-mat$mean)
+
+#function to sell winners and buy losers
+momentum<- function(x){
+  index <- order(x, decreasing=TRUE)
+  x.sort <- sort(x, decreasing=TRUE)
+  constant <- ceiling(length(x)/10)
+  vec <- c(rep.int(1/constant, constant), rep.int(0,length(x)-2*constant),rep.int(-1/constant, constant))
+  x.sort <- rbind(x.sort,vec)
+  x.sort <- x.sort[-1,]
+  x[index] <- x.sort
+  return(x)
+}
+
+weight_mom <- apply(m, 1, momentum) #calculate the weights
+weight_mom <- t(weight_mom)
+
+#we cut the weights and return matrices to make sure they have the same size and weights correspond to the correct return
+return <- df1[-(1:126), 1:(ncol(df1))]
+return <- return[1:(nrow(return)-122), 1:(ncol(return))]
+port_return.mom <- return*weight_mom
+
+#calculating the strategy profit
+port_return.mom <- apply(port_return.mom, 1, sum)
+
+#calculate annlualized mean, std and Sharpe Ratio
+ann_return.mom <- mean(port_return.mom)*252*100
+ann_return.mom
+std_return.mom <- sd(port_return.mom)*sqrt(252)*100
+std_return.mom
+sharpe.mom <- ann_return.mom/std_return.mom
+sharpe.mom
+
+#plot Daily Portfolio Returns and Cumulative Portfolio Returns
+port_return.mom <- as.data.frame(port_return.mom)
+dates <- as.data.frame(dates[-(1:125),])
+dates <- as.data.frame(dates[(1:(nrow(dates)-122)),])
+port_return.mom <- cbind(dates,port_return.mom)
+colnames(port_return.mom) <- c('date', 'return')
+ggplot(port_return.mom)+geom_line(aes(x=date,y=return))+theme_minimal() + xlab("Date")+ylab("Returns") + ggtitle("Daily Portfolio Returns of Momentum Strategy")
+
+port_return.mom$cum.ret.mom <- cumprod(1+port_return.mom$return)*100
+ggplot(port_return.mom)+geom_line(aes(x=date,y=cum.ret.mom))+theme_minimal() + xlab("Date")+ylab("Returns") + ggtitle("Cumulative Portfolio Returns of Momentum Strategy")
+```
+
+
+
+

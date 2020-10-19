@@ -1,0 +1,477 @@
+---
+title: "S&P Momentum and Contrarian"
+output: html_notebook
+---
+S&P 500 Contrarian and Momentum Strategies 2010-2018
+
+```{r}
+library(zoo)
+library(dplyr)
+```
+
+```{r}
+sp2010<- read.csv("/Users/nastyademina/Desktop/r studio/prices_2010-2016.csv")
+sp2013 <- read.csv("/Users/nastyademina/Desktop/r studio/all_stocks_5yr.csv")
+```
+
+```{r}
+#making sure we have the same tickers in two data sets
+test<-sp2010[which(sp2010$symbol %in% unique(sp2013$Name)),]
+sp2013 <- sp2013[which(sp2013$Name %in% unique(test$symbol)),]
+
+#changing the dates
+library("lubridate")
+test$date <- gsub(x=test$date,pattern="00:00:00",replacement="",fixed=T)
+test$date <- as.Date(as.character(test$date), format="%Y-%m-%d")
+sp2013$date <- as.Date(as.character(sp2013$date), format="%Y-%m-%d")
+```
+
+```{r}
+#merge two data frames
+sp2013 <- sp2013[which(sp2013$date>'2016-12-31'),]
+colnames(sp2013) <- c('date','open', 'high', 'low','close', 'volume', 'symbol')
+sp2013 <- sp2013[,c('date','symbol','open','close','low','high','volume')]
+sp <- rbind(test, sp2013)
+
+#subsetting the data (we only will look at the close price, so we need date, closing price and ticker)
+sp500 <- subset(sp, select=c('date','close','symbol'))
+
+#reshape the data to get the shape of the data frame that we need
+sp500 <- reshape(sp500, timevar = "symbol", idvar = "date", direction = "wide")
+```
+
+```{r}
+#for simplicity get rid of columns with NA (stocks that have some missing observations)
+list_na <- c(0)
+for (i in 2:ncol(sp500)){
+  list_na[i] <- sum(is.na(sp500[,i]))
+}
+c <- list_na==0
+
+#new dataframe contains only 438 stocks that stayed in S&P from 2010 to 2018
+sp500 <- sp500[,c]
+sp500 <- sp500[order(sp500$date),]
+```
+
+Contrarian Strategy
+```{r}
+#creating a data frame of returns
+df<-as.data.frame(subset(sp500, select = "date"))
+
+for (i in 2:ncol(sp500)){
+  ret <- (sp500[,i] - lag(sp500[,i]))/lag(sp500[,i])
+  df <- cbind(df,ret)
+}
+
+df <- df[-1,] # cut first row of NA
+dates <- as.data.frame(df$date[2:nrow(df)])
+colnames(dates)[1] <- "date"
+```
+
+```{r,warning=FALSE}
+#calculating market return every day
+df$mean <- apply(df[,-1], 1, FUN=mean)
+market <- as.data.frame(df$mean[2:nrow(df)])
+colnames(market)[1] <- "Market Return"
+```
+
+```{r}
+#defining signal
+contr <- -(df[,c(2:(ncol(df)-1))]-df$mean)
+
+#function to sell winners and buy losers
+contrarian<- function(x){
+  index <- order(x, decreasing=TRUE)
+  x.sort <- sort(x, decreasing=TRUE)
+  constant <- ceiling(length(x)/10)
+  vec <- c(rep.int(1/constant, constant), rep.int(0,length(x)-2*constant),rep.int(-1/constant, constant))
+  x.sort <- rbind(x.sort,vec)
+  x.sort <- x.sort[-1,]
+  x[index] <- x.sort
+  return(x)
+}
+#calculating weights
+weight_contr <- apply(contr, 1, contrarian)
+weight_contr <- t(weight_contr)
+
+#cut the first row of returns and the last row of weights since we are using lagged weights to calculate our returns 
+return <- df[-1, 2:(ncol(df)-1)]
+weight_contr <- weight_contr[1:(nrow(weight_contr)-1),]
+port_return <- return*weight_contr
+
+sum(port_return[1,]!=0)
+sum(port_return[19,]!=0)
+
+#calculating the strategy profit
+port_return.contr <- apply(port_return, 1, sum)
+cum.ret.contr <- cumprod(1+port_return.contr)*100
+```
+
+Measuring Performance
+```{r}
+ann_return.contr <- mean(port_return.contr)*252*100
+ann_return.contr
+std_return.contr <- sd(port_return.contr)*sqrt(252)*100
+std_return.contr
+sharpe.contr <- ann_return.contr/std_return.contr
+sharpe.contr
+```
+
+#Graphs
+##Stocks mean and cumulative mean returns
+```{r}
+library(ggplot2)
+colnames(df)<-c(colnames(sp500),"mean")
+mean_ret<-subset(df, select = c("date","mean"))
+mean_ret<-mutate(mean_ret, cum_ret = cumprod(1+mean))
+ggplot(mean_ret)+geom_line(aes(x=date,y=mean))+theme_minimal()+xlab("Date")+ylab("Returns") + ggtitle("Average Returns of 438 Stocks in S&P500")
+
+ggplot(mean_ret)+geom_line(aes(x=date,y=cum_ret))+theme_minimal() + xlab("Date")+ylab("Returns") + ggtitle("Cumulative Average Return of 438 Stocks in S&P500")
+```
+
+## Autocorrelation of stocks
+```{r}
+acf_fun<-function(x){
+  acf(x, plot = FALSE, lag.max = 1)[1]
+}
+
+acf_sp<-c(0)
+for(i in 2:(ncol(df)-1)){
+  acf_sp[i]<-as.numeric(unlist(acf_fun(df[,i]))[1])
+}
+mean(acf_sp)
+
+hist(acf_sp, main = "Histogram of 1 lag autocorrelations of stocks in S&P", xlab = "Autocorrelation")
+```
+
+## Portfolio Returns
+```{r}
+dates<-as.data.frame(df$date[2:nrow(df)])
+port.returns<-cbind(dates,port_return.contr,cum.ret.contr)
+colnames(port.returns)<-c("date","port_ret","cum_ret")
+ggplot(port.returns) + geom_line(aes(x =date,y=port_ret ))+theme_minimal()+xlab("Date") + ylab("Returns") + ggtitle("Daily Portfolio Returns of Contrarian Strategy") 
+
+ggplot(port.returns) + geom_line(aes(x =date,y=cum_ret ))+theme_minimal()+xlab("Date") + ylab("Returns") + ggtitle("Cumulative Portfolio Returns of Contrarian Strategy") 
+```
+
+Momentum strategy for 6 months
+```{r}
+#creating a data frame of returns
+mom<-as.data.frame(subset(sp500, select = "date"))
+
+for (i in 2:ncol(sp500)){
+  ret <- (sp500[,i] - lag(sp500[,i]))/lag(sp500[,i])
+  mom <- cbind(mom,ret)
+}
+
+mom <- mom[-1,-1] # cut first row of NA
+test <- mom+1
+test <- rollapply(test,126,FUN=prod, by=126) #calculate cumulative returns every six months 
+#we look at the cumulative return for the past six months and based on them calculate the signal 
+#we use that signal for the next six months
+test <- as.data.frame(test)
+test$mean <- apply(test, 1, FUN=mean)
+test <- test[1:(nrow(test)-1),] 
+
+mat <- as.data.frame(matrix(NA,nrow(test)*126,ncol(test)))
+for (i in 0:(nrow(test)-1)){
+  mat[((126*i+1):(126+126*i)),] <- test[(i+1),]
+}
+```
+
+```{r}
+#signal
+colnames(mat)[ncol(mat)] <- "mean"
+m <- (mat[,c(1:(ncol(mat)-1))]-mat$mean)
+
+#function to sell winners and buy losers
+momentum<- function(x){
+  index <- order(x, decreasing=TRUE)
+  x.sort <- sort(x, decreasing=TRUE)
+  constant <- ceiling(length(x)/10)
+  vec <- c(rep.int(1/constant, constant), rep.int(0,length(x)-2*constant),rep.int(-1/constant, constant))
+  x.sort <- rbind(x.sort,vec)
+  x.sort <- x.sort[-1,]
+  x[index] <- x.sort
+  return(x)
+}
+
+weight_mom <- apply(m, 1, momentum)
+weight_mom <- t(weight_mom)
+
+return <- mom[-(1:126), 1:(ncol(mom))]
+return <- return[1:(nrow(return)-22), 1:(ncol(return))]
+weight_mom <- weight_mom[1:(nrow(weight_mom)),]
+port_return.mom <- return*weight_mom
+
+sum(port_return.mom[125,]!=0)
+sum(port_return.mom[19,]!=0)
+
+#calculating the strategy profit
+port_return.mom <- apply(port_return.mom, 1, sum)
+cum.ret.mom <- cumprod(1+port_return.mom)*100
+```
+
+Measuring Performance
+```{r}
+ann_return.mom <- mean(port_return.mom)*252*100
+ann_return.mom
+std_return.mom <- sd(port_return.mom)*sqrt(252)*100
+std_return.mom
+sharpe.mom <- ann_return.mom/std_return.mom
+sharpe.mom
+```
+#Graphs
+## Portfolio Returns
+```{r}
+dates<-as.data.frame(subset(sp500[2:nrow(sp500),], select = "date"))
+dates<-as.data.frame(dates[-(1:126),])
+dates<-as.data.frame(dates[1:(nrow(dates)-22),])
+
+port.returns<-cbind(dates,port_return.mom,cum.ret.mom)
+colnames(port.returns)<-c("date","port_ret","cum_ret")
+ggplot(port.returns) + geom_line(aes(x =date,y=port_ret ))+theme_minimal()+xlab("Date") + ylab("Returns") + ggtitle("Daily Portfolio Returns of Momentum Strategy") 
+
+ggplot(port.returns) + geom_line(aes(x =date,y=cum_ret ))+theme_minimal()+xlab("Date") + ylab("Returns") + ggtitle("Cumulative Portfolio Returns of Momentum Strategy") 
+```
+
+
+
+Momentum strategy for 6 months and rebalance every 3 months
+```{r}
+#creating a data frame of returns
+mom<-as.data.frame(subset(sp500, select = "date"))
+
+for (i in 2:ncol(sp500)){
+  ret <- (sp500[,i] - lag(sp500[,i]))/lag(sp500[,i])
+  mom <- cbind(mom,ret)
+}
+
+mom <- mom[-1,-1] # cut first row of NA
+test <- mom+1
+test <- rollapply(test,126,FUN=prod, by=63) #calculate cumulative returns every six months 
+#we look at the cumulative return for the past six months and based on them calculate the signal 
+#we use that signal for the next three months
+test <- as.data.frame(test)
+test$mean <- apply(test, 1, FUN=mean)
+test <- test[1:(nrow(test)-1),] 
+
+mat <- as.data.frame(matrix(NA,nrow(test)*63,ncol(test)))
+for (i in 0:(nrow(test)-1)){
+  mat[((63*i+1):(63+63*i)),] <- test[(i+1),]
+}
+```
+
+```{r}
+colnames(mat)[ncol(mat)] <- "mean"
+m <- (mat[,c(1:(ncol(mat)-1))]-mat$mean)
+
+#function to sell winners and buy losers
+momentum<- function(x){
+  index <- order(x, decreasing=TRUE)
+  x.sort <- sort(x, decreasing=TRUE)
+  constant <- ceiling(length(x)/10)
+  vec <- c(rep.int(1/constant, constant), rep.int(0,length(x)-2*constant),rep.int(-1/constant, constant))
+  x.sort <- rbind(x.sort,vec)
+  x.sort <- x.sort[-1,]
+  x[index] <- x.sort
+  return(x)
+}
+
+weight_mom <- apply(m, 1, momentum)
+weight_mom <- t(weight_mom)
+
+return <- mom[-(1:126), 1:(ncol(mom))]
+return <- return[1:(nrow(return)-22), 1:(ncol(return))]
+weight_mom <- weight_mom[1:(nrow(weight_mom)),]
+port_return.mom <- return*weight_mom
+
+sum(port_return.mom[125,]!=0)
+sum(port_return.mom[19,]!=0)
+
+#calculating the strategy profit
+port_return.mom <- apply(port_return.mom, 1, sum)
+```
+
+Measuring Performance
+```{r}
+ann_return.mom <- mean(port_return.mom)*252*100
+ann_return.mom
+std_return.mom <- sd(port_return.mom)*sqrt(252)*100
+std_return.mom
+sharpe.mom <- ann_return.mom/std_return.mom
+sharpe.mom
+```
+
+Transaction costs analysis
+Contrarian
+```{r}
+df<-as.data.frame(subset(sp500, select = "date"))
+
+for (i in 2:ncol(sp500)){
+  ret <- (sp500[,i] - lag(sp500[,i]))/lag(sp500[,i])
+  df <- cbind(df,ret)
+}
+
+df <- df[-1,] # cut first row of NA
+dates <- as.data.frame(df$date[2:nrow(df)])
+colnames(dates)[1] <- "date"
+```
+
+```{r,warning=FALSE}
+#calculating mean
+df$mean <- apply(df[,-1], 1, FUN=mean)
+market <- as.data.frame(df$mean[2:nrow(df)])
+colnames(market)[1] <- "Market Return"
+```
+
+```{r}
+contr <- -(df[,c(2:(ncol(df)-1))]-df$mean)
+
+#function to sell winners and buy losers
+contrarian<- function(x){
+  index <- order(x, decreasing=TRUE)
+  x.sort <- sort(x, decreasing=TRUE)
+  constant <- ceiling(length(x)/10)
+  vec <- c(rep.int(1/constant, constant), rep.int(0,length(x)-2*constant),rep.int(-1/constant, constant))
+  x.sort <- rbind(x.sort,vec)
+  x.sort <- x.sort[-1,]
+  x[index] <- x.sort
+  return(x)
+}
+
+weight_contr <- apply(contr, 1, contrarian)
+weight_contr <- t(weight_contr)
+cum.ret.contr.1 <- c(100,cum.ret.contr)
+```
+
+```{r}
+#calculating transaction costs
+trans <- cum.ret.contr.1*weight_contr
+trans <- rbind(0, trans)
+
+transaction<-data.frame(NA)
+
+for (i in 1:ncol(trans)){
+  cost <- abs(trans[,i] - lag(trans[,i]))
+  transaction<- cbind(transaction,cost)
+}
+
+transaction <- transaction[-1,-1]
+trans_cost <- 0.01*apply(transaction, 1, sum)
+
+trans_cost <- c(0,trans_cost[1:(length(trans_cost)-1)] )
+#####################1
+#cum.ret.contr1. <- cum.ret.contr.1[1:(length(cum.ret.contr.1)-1)]
+#net_profit.contr <- net_profit.contr[1:(length(net_profit.contr)-1)]
+net_profit.contr <- cum.ret.contr.1-trans_cost
+
+net_return.contr<-(net_profit.contr/lag(net_profit.contr))-1
+
+plot(net_return.contr, type = "l")
+```
+
+Net profit graph
+```{r}
+plot(net_profit.contr, type='l')
+```
+Perfomance
+```{r}
+ann_return.contr <- mean(net_return.contr, na.rm = T)*252*100
+ann_return.contr
+std_return.contr <- sd(net_return.contr, na.rm = T)*sqrt(252)*100
+std_return.contr
+sharpe.contr <- ann_return.contr/std_return.contr
+sharpe.contr
+```
+[1] -8.516652
+[1] 15.98407
+[1] -0.5328214
+
+Transaction costs
+Momentum
+```{r}
+mom<-as.data.frame(subset(sp500, select = "date"))
+
+for (i in 2:ncol(sp500)){
+  ret <- (sp500[,i] - lag(sp500[,i]))/lag(sp500[,i])
+  mom <- cbind(mom,ret)
+}
+
+mom <- mom[-1,-1] # cut first row of NA
+test <- mom+1
+test <- rollapply(test,126,FUN=prod, by=126) #calculate cumulative returns every six months 
+#we look at the cumulative return for the past six months and based on them calculate the signal 
+#we use that signal for the next six months
+test <- as.data.frame(test)
+test$mean <- apply(test, 1, FUN=mean)
+test <- test[1:(nrow(test)-1),] 
+
+mat <- as.data.frame(matrix(NA,nrow(test)*126,ncol(test)))
+for (i in 0:(nrow(test)-1)){
+  mat[((126*i+1):(126+126*i)),] <- test[(i+1),]
+}
+```
+
+```{r}
+#signal
+colnames(mat)[ncol(mat)] <- "mean"
+m <- (mat[,c(1:(ncol(mat)-1))]-mat$mean)
+
+#function to sell winners and buy losers
+momentum<- function(x){
+  index <- order(x, decreasing=TRUE)
+  x.sort <- sort(x, decreasing=TRUE)
+  constant <- ceiling(length(x)/10)
+  vec <- c(rep.int(1/constant, constant), rep.int(0,length(x)-2*constant),rep.int(-1/constant, constant))
+  x.sort <- rbind(x.sort,vec)
+  x.sort <- x.sort[-1,]
+  x[index] <- x.sort
+  return(x)
+}
+
+weight_mom <- apply(m, 1, momentum)
+weight_mom <- t(weight_mom)
+
+
+#calculating the strategy profit
+cum.ret.mom.1 <- c(100,cum.ret.mom)
+cum.ret.mom.1 <- cum.ret.mom.1[1:(length(cum.ret.mom.1)-1)]
+```
+
+```{r}
+#calculating transaction costs
+trans <- cum.ret.mom.1*weight_mom
+
+transaction<-data.frame(NA)
+
+for (i in 1:ncol(trans)){
+  cost <- abs(trans[,i] - lag(trans[,i]))
+  transaction<- cbind(transaction,cost)
+}
+
+transaction <- transaction[-1,-1]
+trans_cost.mom <- 0.01*apply(transaction, 1, sum)
+
+trans_cost.mom <- c(0,trans_cost.mom[1:(length(trans_cost.mom))])
+
+net_profit.mom <- cum.ret.mom.1-trans_cost.mom
+net_return.mom<-net_profit.mom/lag(net_profit.mom)-1
+
+plot(net_return.mom, type = "l")
+```
+
+Net profit graph
+```{r}
+plot(net_profit.mom, type='l')
+```
+
+Perfomance
+```{r}
+ann_return.mom <- mean(net_return.mom, na.rm = T)*252*100
+std_return.mom <- sd(net_return.mom, na.rm = T)*sqrt(252)*100
+sharpe.mom <- ann_return.mom/std_return.mom
+sharpe.mom
+```
+
+

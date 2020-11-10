@@ -1,0 +1,357 @@
+---
+title: "Analytics Edge Final Project"
+author: "Anastasia Demina, Elina Harutyunyan, Harveer Mahajan, Eskild Jorgensen"
+date: "11/22/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tm)
+#library(RWeka)
+install.packages("magrittr")
+install.packages("randomForest")
+install.packages("caret")
+install.packages("glmnet")
+library(magrittr)
+library(Matrix)
+library(glmnet)
+library(ROCR)
+library(ggplot2)
+library(dplyr)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(stats)
+library(caret)
+reddit_news<-read.csv("/Users/nastyademina/Desktop/r studio/RedditNews.csv",stringsAsFactors = FALSE)
+combined<-read.csv("/Users/nastyademina/Desktop/r studio/Combined_News_DJIA.csv",stringsAsFactors = FALSE)
+djia<-read.csv("/Users/nastyademina/Desktop/r studio/upload_DJIA_table.csv",stringsAsFactors = FALSE)
+reddit_news$Date <- as.Date(reddit_news$Date)
+combined$Date <- as.Date(combined$Date)
+djia$Date <- as.Date(djia$Date)
+```
+
+Creating binary labels for Dow Jones
+```{r}
+djia<-djia[order(djia$Date, decreasing = FALSE),]
+dif<-c(NA,diff(djia$Adj.Close))
+djia<-cbind(djia,dif)
+djia$label<-ifelse(djia$dif >=0,1,0)
+djia$label[1]<-1
+djia$dif<-NULL
+```
+Adjusted price on Aug 7, 2008 was $11,431.43, hence the first is classified as 1.
+
+combined cleaning
+```{r}
+# Combine headlines into one text blob for each day and add sentence separation token
+combined$all <- paste(combined$Top1, combined$Top2, combined$Top3, combined$Top4, combined$Top5, combined$Top6,
+                  combined$Top7, combined$Top8, combined$Top9, combined$Top10, combined$Top11, combined$Top12, 
+                  combined$Top13, combined$Top14, combined$Top15, combined$Top16, combined$Top17, combined$Top18,
+                  combined$Top19, combined$Top20, combined$Top21, combined$Top22, combined$Top23, combined$Top24,
+                  combined$Top25, sep=' <s> ')
+                  
+# Get rid of those pesky b's and backslashes 
+combined$all <- gsub('b"|b\'|\\\\|\\"', "", combined$all)
+
+# Get rid of all punctuation except headline separators
+combined$all <- gsub("([<>])|[[:punct:]]", "\\1", combined$all)
+
+# Reduce to only the three columns we need. 
+combined <- combined[, c('Date', 'Label', 'all')]
+
+#control <- list(
+#    removeNumbers = TRUE,
+#    tolower = TRUE,
+    # exclude stopwords and headline tokens
+#    stopwords = c(stopwords(kind = 'english'), '<s>')
+#)
+
+ dtm <- Corpus(VectorSource(combined$all)) %>%
+     tm_map(removeNumbers) %>%
+     tm_map(stripWhitespace) %>%
+     tm_map(stemDocument) %>%
+     tm_map(removeWords, stopwords("english")) %>%
+     tm_map(removePunctuation) %>%
+     tm_map(content_transformer(tolower))
+
+freqs <- DocumentTermMatrix(dtm)
+#findFreqTerms(dtm, lowfreq=500)
+
+sparse <- removeSparseTerms(freqs, 0.8)
+
+news<-as.data.frame(as.matrix(sparse))
+#colnames(news)
+
+news<-cbind(combined[,c(1,2)],news)
+colnames(news)[1:2]<-c("Date","label")
+
+split1 = (news$Date <= "2014-12-31")
+split2 = (news$Date > "2014-12-31")
+train = news[split1,]
+test = news[split2,]
+
+```
+
+CART Regression
+Do cross validation on CP parameter!
+```{r}
+cart<- rpart(Label ~ .-Date, data=train, method="class", cp = .009)
+prp(cart)
+predictions.cart <- predict(cart, newdata=test, type="class")
+matrix.cart = table(test$Label, predictions.cart) 
+accuracy.cart = (matrix.cart[1,1]+matrix.cart[2,2])/nrow(test)
+TPR.cart = (matrix.cart[2,2])/sum(matrix.cart[2,])
+FPR.cart = (matrix.cart[1,2])/sum(matrix.cart[1,])
+accuracy.cart
+TPR.cart
+FPR.cart
+```
+
+Random Forest
+```{r}
+colnames(train) <- paste(colnames(train), "_c", sep = "")
+colnames(test) <- paste(colnames(test), "_c", sep = "")
+
+rf = randomForest(label_c~. -Date_c, data=train, mtry=2, nodesize=20, ntree=500)#mtry=2, nodesize=20, ntree=500
+important_vars = as.data.frame(importance(rf))
+
+important_vars$vars <- rownames(important_vars)
+important_vars <- important_vars[order(important_vars$IncNodePurity, decreasing = TRUE),]
+
+#pred.rf = predict(rf, newdata=test)
+#matrix.rf = table(test$label, pred.rf) 
+```
+
+Logistic Regression
+```{r}
+split1 = (news$Date <= "2014-12-31")
+split2 = (news$Date > "2014-12-31")
+train = news[split1,]
+test = news[split2,]
+
+logistic<-glm(Label ~ . -Date, data = train, family = "binomial")
+summary(logistic)
+pred.logistic <- predict(logistic, newdata=test, type="response")
+head(pred.logistic)
+pred.logistic<-ifelse(pred.logistic > 0.5, 1,0)
+matrix.logistic = table(test$Label, pred.logistic) 
+accuracy.logistic = (matrix.logistic[1,1]+matrix.logistic[2,2])/nrow(test)
+TPR.logistic = (matrix.logistic[2,2])/sum(matrix.logistic[2,])
+FPR.logistic = (matrix.logistic[1,2])/sum(matrix.logistic[1,])
+```
+
+Starting over with recitation code to create the dataframe
+```{r}
+corpus = Corpus(VectorSource(combined$all))
+corpus = tm_map(corpus, tolower)
+strwrap(corpus[[1]])
+corpus <- tm_map(corpus, removePunctuation)
+corpus = tm_map(corpus, removeWords, stopwords("english"))
+corpus <-  tm_map(corpus,removeNumbers)
+corpus = tm_map(corpus, removeWords, c("s"))
+corpus = tm_map(corpus, stemDocument)
+frequencies = DocumentTermMatrix(corpus)
+findFreqTerms(frequencies, lowfreq=500)
+sparse = removeSparseTerms(frequencies, 0.8)
+
+document_terms = as.data.frame(as.matrix(sparse))
+
+document_terms <- cbind(combined[,c(1,2)],document_terms)
+    
+split1 = (document_terms$Date <= "2014-12-31")
+split2 = (document_terms$Date > "2014-12-31")
+train = document_terms[split1,]
+test = document_terms[split2,]
+
+train$lead_label <- lead(train$Label)
+test$lead_label <- lead(test$Label)
+train<-train[-nrow(train),]
+test<-test[-nrow(test),]
+
+```
+
+Regular Logistic Regression gives us accuracy of 46%, worse than baseline! need to change this somehow. When we lead the label variable, we get a lower accuracy of 42.44%.
+```{r}
+logreg = glm(lead_label ~.-Date, data=train, family="binomial")
+summary(logreg)
+
+predictions.logreg <- predict(logreg, newdata=test, type="response")
+matrix.logreg = table(test$Label, predictions.logreg > 0.5)   # threshold = 0.5
+matrix.logreg    # confusion matrix
+accuracy.logreg = (matrix.logreg[1,1]+matrix.logreg[2,2])/nrow(test)
+TPR.logreg = (matrix.logreg[2,2])/sum(matrix.logreg[2,])
+FPR.logreg = (matrix.logreg[1,2])/sum(matrix.logreg[1,])
+```
+
+Recitation RF with CV
+```{r}
+#RF with cross validation
+set.seed(144)
+train$Label<-as.factor(train$Label)
+test$Label<-as.factor(test$Label)
+
+
+rf.cv = train(y = train$Label,
+              x = subset(train, select=-c(Label,Date)),
+              method="rf",
+              trControl=trainControl(method="cv", number=10),  # 10-fold 
+              tuneGrid=data.frame(mtry=seq(1,10,1),nodesize=seq(10,19,1), ntree=seq(1,10,1)))         
+
+# The cross validation results show us that the best model uses mtry = 3 if we use RMSE as our criterion.
+rf.cv
+# We can plot the relationship between mtry and RMSE
+plot(rf.cv$results$mtry, rf.cv$results$Accuracy, type = "l",xlab = "mtry",ylab = "Accuracy")
+ # customize x ticks
+# Like before, we can extract the best model using:
+rf.mod.final = rf.cv$finalModel
+# When we extract the final model, note that R re-trained it in the back end with the full training set.
+
+# Finally, we can make predictions
+pred.test = predict(rf.mod.final, newdata=test)
+
+
+matrix.rf = table(test$Label, pred.test) 
+accuracy.rf = (matrix.rf[1,1]+matrix.rf[2,2])/nrow(test)
+TPR.rf = (matrix.rf[2,2])/sum(matrix.rf[2,])
+FPR.rf = (matrix.rf[1,2])/sum(matrix.rf[1,])
+
+table(train$Label)
+
+pred_base<- matrix(1,nrow(test),1)
+mat_base = table(test$Label, pred_base) 
+accuracy_base = (mat_base[2,1])/nrow(test)
+```
+
+
+
+
+Recitation RF with CV, with LEAD LABEL! With lead label, baseline model gives us 50.6% accuracy.
+```{r}
+#RF with cross validation
+set.seed(144)
+train$lead_label<-as.factor(train$lead_label)
+test$lead_label<-as.factor(test$lead_label)
+
+
+pred_base<- matrix(1,nrow(test),1)
+mat_base = table(test$lead_label, pred_base) 
+accuracy_base = (mat_base[2,1])/nrow(test)
+```
+
+
+TUNED RF model, gives us 54% accuracy
+```{r}
+##### TUNING RF model
+library(mlr)
+
+train$Date <- NULL
+test$Date <- NULL
+
+#traintask <- makeClassifTask(data = train,target = "Label") 
+#testtask <- makeClassifTask(data = test,target = "Label")
+
+train$Label <- NULL
+test$Label <- NULL
+
+traintask <- makeClassifTask(data = train,target = "lead_label") 
+testtask <- makeClassifTask(data = test,target = "lead_label")
+
+
+rdesc <- makeResampleDesc("CV",iters=10L)
+
+
+rf.lrn <- makeLearner("classif.randomForest")
+rf.lrn$par.vals <- list(ntree = 100L, importance=TRUE) #, cutoff = c(0.75,0.25)
+r <- resample(learner = rf.lrn, task = traintask, resampling = rdesc, measures = list(tpr,fpr,fnr,fpr,acc), show.info = T)
+
+getParamSet(rf.lrn)
+
+#set parameter space
+params <- makeParamSet(makeIntegerParam("mtry",lower = 2,upper = 10),makeIntegerParam("nodesize",lower = 10,upper = 50), makeIntegerParam("ntree",lower = 10,upper = 30))
+
+#set validation strategy
+rdesc <- makeResampleDesc("CV",iters=5)
+
+#set optimization technique
+ctrl <- makeTuneControlRandom(maxit = 10L)
+
+#start tuning
+tune <- tuneParams(learner = rf.lrn, task = traintask, resampling = rdesc, measures = list(acc), par.set = params, control = ctrl, show.info = T)
+
+#tune result: best params  mtry=7; nodesize=12; ntree=19
+# lead tune restuls mtry=2; nodesize=13; ntree=26 : acc.test.mean=0.5267081
+rf = randomForest(lead_label~. , data=train, mtry=2, nodesize=13, ntree=26)
+important_vars = as.data.frame(importance(rf))
+important_vars$vars <- rownames(important_vars)
+important_vars <- important_vars[order(important_vars$MeanDecreaseGini, decreasing = TRUE),]
+#now lets predict
+pred_rf_tune = predict(rf, newdata=test)
+matrix_rf_tune = table(test$lead_label, pred_rf_tune) 
+accuracy_rf_tune = (matrix_rf_tune[1,1]+matrix_rf_tune[2,2])/nrow(test)
+TPR_rf_tune = (matrix_rf_tune[2,2])/sum(matrix_rf_tune[2,])
+FPR_rf_tune = (matrix_rf_tune[1,2])/sum(matrix_rf_tune[1,])
+```
+
+Bag of Words: Mende, come back here again
+```{r}
+combined_test <- cbind(combined$Date, combined$Label, tibble(text=combined$all))
+colnames(combined_test)[1:2] <- c("date","label")
+
+#combined_test2 <- combined_test %>% unnest_tokens(ngram,text,token="ngrams",n=2) %>% separate(ngram,c("word1","word2"),sep=" ")   %>% filter(!(word1 %in% stop_words$word) & !(word2 %in% stop_words$word)) %>% unite(ngram, word1, word2, sep=" ")
+
+strwrap(corpus[[1]])
+corpus = Corpus(VectorSource(combined_test$text))
+corpus <- tm_map(corpus, removePunctuation)
+corpus <-  tm_map(corpus,removeNumbers)
+corpus = tm_map(corpus, removeWords, c("s"))
+corpus = tm_map(corpus, stemDocument)
+corpus = tm_map(corpus, tolower)
+
+
+frequencies = TermDocumentMatrix(corpus, control = list(tokenize = BigramTokenizer))
+findFreqTerms(frequencies, lowfreq=800)
+sparse = removeSparseTerms(frequencies, 0.8)
+
+document_terms = as.data.frame(as.matrix(sparse))
+
+document_terms <- cbind(combined[,c(1,2)],document_terms)
+    
+split1 = (document_terms$Date <= "2014-12-31")
+split2 = (document_terms$Date > "2014-12-31")
+train = document_terms[split1,]
+test = document_terms[split2,]
+
+
+#BigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+#tdm.bigram = TermDocumentMatrix(corpus,
+#control = list(tokenize = BigramTokenizer))
+
+#freq = sort(rowSums(as.matrix(tdm.bigram)),decreasing = TRUE)
+#freq.df = data.frame(word=names(freq), freq=freq)
+#head(freq.df, 20)
+
+#sparse = removeSparseTerms(tdm.bigram, 0.8)
+#document_terms = as.data.frame(as.matrix(sparse))
+#document_terms <- cbind(combined[,c(1,2)],document_terms)
+```
+
+Neural Nets
+```{r}
+install.packages("keras")
+library(keras)
+install_keras()
+nrow(train)
+
+y_train <- as.data.frame(train[,c(2)])
+x_train <- as.data.frame(train[,c(3:202)])
+
+deep.model.1layer <- keras_model_sequential() %>% layer_dense(units=256, activation='relu', input_shape=c(200)) %>% layer_dropout(rate=0.4) %>% layer_dense(units=10, activation='softmax')
+
+deep.model.1layer %>% compile(loss='categorical_crossentropy', optimizer=optimizer_rmsprop(), metrics=c('accuracy'))
+
+deep.fit <- deep.model.1layer %>% fit(x_train, y_train, epochs=30, batch_size=128, validation_split=0.2)
+
+write.csv(test, file="/Users/nastyademina/Desktop/r studio/test")
+write.csv(train, file="/Users/nastyademina/Desktop/r studio/train")
+```
